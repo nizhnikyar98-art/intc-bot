@@ -1,30 +1,26 @@
 import os
 import logging
 import threading
+import re
 from flask import Flask
-from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# 1. Настройка логов (Исправлено)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Настройка логов
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 2. Мини-сервер для Koyeb (Health Check)
 app = Flask(__name__)
-
 @app.route('/')
 def index():
-    return "Бот ИНТЦ «Русский» успешно запущен на Koyeb!"
+    return "Цифровой агент ИНТЦ «Русский» активен!"
 
 def run_flask():
-    # Koyeb выдает порт автоматически через переменную PORT
     port = int(os.getenv("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# 3. Логика пересылки сообщений
-async def forward_to_group(update, context):
+# 1. ПЕРЕСЫЛКА: Из лички бота -> В группу поддержки
+async def forward_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = os.getenv("GROUP_ID")
     if update.message and group_id:
         user = update.message.from_user
@@ -34,22 +30,49 @@ async def forward_to_group(update, context):
             await context.bot.send_message(chat_id=int(group_id), text=text)
             await update.message.reply_text("Ваш вопрос передан в поддержку.")
         except Exception as e:
-            logger.error(f"Ошибка при пересылке: {e}")
+            logger.error(f"Ошибка пересылки: {e}")
+
+# 2. ОТВЕТ: Из группы поддержки -> Обратно пользователю
+async def handle_group_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    group_id = os.getenv("GROUP_ID")
+    
+    # Проверяем, что это ответ в нужной группе
+    if not update.message or not update.message.reply_to_message:
+        return
+    if str(update.message.chat_id) != group_id:
+        return
+
+    replied_msg = update.message.reply_to_message
+    
+    # Ищем ID пользователя в тексте сообщения, на которое вы ответили
+    match = re.search(r'\(ID: (\d+)\)', replied_msg.text)
+    if match:
+        user_id = int(match.group(1))
+        try:
+            await context.bot.send_message(chat_id=user_id, text=update.message.text)
+            await update.message.reply_text("✅ Ответ отправлен пользователю.")
+        except Exception as e:
+            logger.error(f"Ошибка отправки ответа: {e}")
+            await update.message.reply_text("❌ Не удалось отправить ответ. Возможно, пользователь заблокировал бота.")
 
 def main():
-    # Запуск Flask в фоне, чтобы Koyeb не ругался на Health Check
     threading.Thread(target=run_flask, daemon=True).start()
     
     token = os.getenv("BOT_TOKEN")
-    if not token:
-        logger.error("КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден!")
+    group_id = os.getenv("GROUP_ID")
+    if not token or not group_id:
+        logger.error("Переменные окружения не найдены!")
         return
 
-    # Запуск Telegram бота
     application = ApplicationBuilder().token(token.strip()).build()
+    
+    # Обработчик для личных сообщений (от пользователя к вам)
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, forward_to_group))
     
-    logger.info("Бот ИНТЦ прошел проверку и запускается...")
+    # Обработчик для ответов в группе (от вас к пользователю)
+    application.add_handler(MessageHandler(filters.REPLY & filters.Chat(chat_id=int(group_id)), handle_group_reply))
+    
+    logger.info("Бот запущен и готов к работе!")
     application.run_polling()
 
 if __name__ == "__main__":
