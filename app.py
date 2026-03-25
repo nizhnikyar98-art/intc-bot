@@ -2,136 +2,145 @@ import os
 import logging
 import threading
 import re
+import time
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # --- МИНИ-СЕРВЕР (ДЛЯ KOYEB/HEALTH CHECK) ---
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
-@app.route('/')
+@flask_app.route('/')
 def index():
     return "Цифровой агент ИНТЦ «Русский» активен и готов к работе!"
 
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
 def run_flask():
-    # Порт подхватывается автоматически из настроек сервиса
     port = int(os.getenv("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
+    flask_app.run(host='0.0.0.0', port=port)
 
 # --- ЛОГИКА ПРИВЕТСТВИЯ (/start) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "**Добро пожаловать в службу поддержки ИНТЦ «Русский»!**\n\n"
+        "➖➖➖➖➖➖➖➖➖➖\n"
+        "<b>Добро пожаловать в службу поддержки ИНТЦ «Русский»!</b>\n\n"
         "Я — ваш цифровой ассистент для оперативного взаимодействия с командой Центра.\n\n"
-        "**Чем я могу помочь:**\n"
-        "• **Задать вопрос:** Просто напишите сообщение в этот чат. Я передам его специалистам, и вы получите ответ здесь же.\n"
-        "• **Изучить регламенты:** Нажмите кнопку **«Open»** в меню. Она откроет приложение с базой документов и описанием процедур.\n\n"
-        "Пожалуйста, изложите ваш вопрос ниже."
+        "<b>Чем я могу помочь:</b>\n"
+        "• <b>Задать вопрос:</b> Просто напишите сообщение в этот чат. Я передам его специалистам, и вы получите ответ здесь же.\n"
+        "• <b>Изучить регламенты:</b> Нажмите кнопку <b>«Open»</b> в меню. Она откроет приложение с базой документов и описанием процедур.\n\n"
+        "Пожалуйста, изложите ваш вопрос ниже.\n"
+        "➖➖➖➖➖➖➖➖➖➖"
     )
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await update.message.reply_text(welcome_text, parse_mode='HTML')
 
 # --- ЛОГИКА ПЕРЕСЫЛКИ: Пользователь -> Группа поддержки ---
 async def forward_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = os.getenv("GROUP_ID")
-    
-    # Игнорируем команды (начинающиеся с /), чтобы не спамить в группу
+
     if not update.message or not update.message.text or update.message.text.startswith('/'):
         return
 
     if group_id:
         user = update.message.from_user
         username = user.username or "Аноним"
-        
-        # Оформление карточки вопроса для сотрудников (стиль "Бланк")
+
         card_text = (
-            f"📥 **Новое обращение**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 **Отправитель:** @{username}\n"
-            f"🆔 **ID:** `{user.id}`\n\n"
-            f"📝 **Вопрос:**\n{update.message.text}\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
+            f"📥 <b>Новое обращение</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"👤 <b>Отправитель:</b> @{username}\n"
+            f"🆔 <b>ID:</b> <code>{user.id}</code>\n\n"
+            f"📝 <b>Вопрос:</b>\n{update.message.text}\n"
+            f"➖➖➖➖➖➖➖➖➖➖"
         )
-        
+
         try:
-            await context.bot.send_message(chat_id=int(group_id), text=card_text, parse_mode='Markdown')
-            
-            # Статусное уведомление для пользователя (курсив для легкости)
+            await context.bot.send_message(chat_id=int(group_id), text=card_text, parse_mode='HTML')
+
             status_msg = (
-                "📨 **Запрос зарегистрирован**\n"
-                "_Ваше обращение передано в работу специалистам ИНТЦ._"
+                "📨 <b>Запрос зарегистрирован</b>\n"
+                "<i>Ваше обращение передано в работу специалистам ИНТЦ.</i>"
             )
-            await update.message.reply_text(status_msg, parse_mode='Markdown')
+            await update.message.reply_text(status_msg, parse_mode='HTML')
         except Exception as e:
             logger.error(f"Ошибка пересылки: {e}")
 
 # --- ЛОГИКА ОТВЕТА: Группа поддержки -> Пользователь ---
 async def handle_group_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = os.getenv("GROUP_ID")
-    
+
     if not update.message or not update.message.reply_to_message or not update.message.text:
         return
     if str(update.message.chat_id) != group_id:
         return
 
     replied_msg = update.message.reply_to_message
-    # Извлекаем ID из карточки вопроса (ищем цифры после "ID: ")
-    match = re.search(r'ID: (\d+)', replied_msg.text)
-    
+    if not replied_msg.text:
+        return
+
+    # Ищем ID в тексте карточки (text содержит уже отрендеренный текст без HTML-тегов)
+    match = re.search(r'ID:\s*(\d+)', replied_msg.text)
+
     if match:
         user_id = int(match.group(1))
-        
-        # Оформление официального ответа для пользователя
+
         official_reply = (
-            f"🏛 **Официальный ответ ИНТЦ «Русский»**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏛 <b>Официальный ответ ИНТЦ «Русский»</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n\n"
             f"{update.message.text}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f" _Вы можете отправить уточняющий вопрос в ответ на это сообщение._"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"<i>Вы можете отправить уточняющий вопрос в ответ на это сообщение.</i>"
         )
-        
+
         try:
-            await context.bot.send_message(chat_id=user_id, text=official_reply, parse_mode='Markdown')
-            await update.message.reply_text("✅ **Ответ успешно доставлен**")
+            await context.bot.send_message(chat_id=user_id, text=official_reply, parse_mode='HTML')
+            await update.message.reply_text("✅ <b>Ответ успешно доставлен</b>", parse_mode='HTML')
         except Exception as e:
             logger.error(f"Ошибка отправки: {e}")
-            await update.message.reply_text("❌ **Ошибка доставки: пользователь заблокировал бота**")
+            await update.message.reply_text("❌ <b>Ошибка доставки: пользователь заблокировал бота</b>", parse_mode='HTML')
 
 # --- ЗАПУСК БОТА ---
 def main():
-    # Запуск Flask в отдельном потоке (keep-alive)
-    threading.Thread(target=run_flask, daemon=True).start()
-    
+    # Запуск Flask в отдельном потоке — НЕ daemon, 
+    # чтобы health check работал даже если бот ещё не запустился
+    flask_thread = threading.Thread(target=run_flask, daemon=False)
+    flask_thread.start()
+    logger.info("Flask health-check сервер запущен.")
+
     token = os.getenv("BOT_TOKEN")
     group_id = os.getenv("GROUP_ID")
-    
+
     if not token or not group_id:
         logger.error("Ошибка: Переменные окружения BOT_TOKEN или GROUP_ID не заданы!")
+        # НЕ выходим — Flask должен продолжать работу, 
+        # чтобы Koyeb не застрял в Provisioning.
+        # Просто ждём, пока переменные не будут заданы.
+        flask_thread.join()
         return
 
     application = ApplicationBuilder().token(token.strip()).build()
-    
-    # 1. Обработка команды /start
+
     application.add_handler(CommandHandler("start", start_command))
-    
-    # 2. Обработка входящих вопросов (в личке бота)
+
     application.add_handler(MessageHandler(
-        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         forward_to_group
     ))
-    
-    # 3. Обработка ответов сотрудников (в группе поддержки)
+
     application.add_handler(MessageHandler(
-        filters.REPLY & filters.Chat(chat_id=int(group_id)), 
+        filters.REPLY & filters.Chat(chat_id=int(group_id)),
         handle_group_reply
     ))
-    
+
     logger.info("Бот ИНТЦ «Русский» успешно запущен!")
     application.run_polling()
 
