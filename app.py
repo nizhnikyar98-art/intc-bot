@@ -22,7 +22,7 @@ def index():
 
 def run_flask():
     # Порт подхватывается автоматически из настроек сервиса
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
 
 # --- ЛОГИКА ПРИВЕТСТВИЯ (/start) ---
